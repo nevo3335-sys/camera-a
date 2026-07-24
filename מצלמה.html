@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Magic Cam - Multi View Stable</title>
+    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+    <style>
+        body { margin: 0; background: #000; color: #fff; font-family: system-ui; height: 100vh; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+        .box { text-align: center; background: #111; padding: 25px; border-radius: 20px; border: 1px solid #333; z-index: 20; width: 280px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
+        input { padding: 12px; border-radius: 10px; border: 1px solid #444; background: #222; color: #fff; width: 85%; text-align: center; font-size: 18px; margin-bottom: 15px; }
+        .btn-group { display: flex; gap: 10px; flex-direction: column; }
+        button { padding: 14px; border-radius: 10px; border: none; font-weight: bold; cursor: pointer; font-size: 15px; }
+        .pc-btn { background: #00d4ff; color: #000; }
+        .cam-btn { background: #ff3e00; color: #fff; }
+        #url-bar { position: fixed; top: 10px; left: 10px; right: 10px; background: rgba(0, 0, 0, 0.8); padding: 10px; border-radius: 10px; font-size: 13px; z-index: 100; border: 1px solid #444; display: none; align-items: center; justify-content: space-between; }
+        #url-bar span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-left: 10px; direction: ltr; flex: 1; }
+        video { position: fixed; inset: 0; width: 100%; height: 100%; object-fit: cover; z-index: 10; display: none; background: #000; }
+        #status-msg { position: fixed; bottom: 20px; width: 100%; text-align: center; font-size: 14px; color: #00d4ff; z-index: 100; text-shadow: 0 0 5px #000; }
+        #flip-btn { position: fixed; bottom: 50px; right: 30px; background: rgba(255,255,255,0.3); color: white; border: 1px solid white; width: 60px; height: 60px; border-radius: 50%; z-index: 40; display: none; backdrop-filter: blur(5px); font-size: 24px; }
+        
+        /* כפתור הפעלה ידני לצופה במקרה שהדפדפן חוסם אוטומציה */
+        #play-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.85); z-index: 999; display: none; align-items: center; justify-content: center; flex-direction: column; }
+        #play-overlay button { background: #00d4ff; color: #000; font-size: 20px; padding: 15px 30px; border-radius: 15px; }
+    </style>
+</head>
+<body>
+
+    <div id="url-bar">
+        <span id="link-text"></span>
+        <button onclick="copyLink()" style="padding: 5px 10px; background: #333; color: white; border-radius: 5px; border: 1px solid #555;">העתק</button>
+    </div>
+
+    <div id="status-msg">מוכן לחיבור</div>
+    <button id="flip-btn" onclick="flipCamera()">🔄</button>
+
+    <!-- שכבת הגנה להפעלה ידנית של הוידאו אם הדפדפן עוצר אותה -->
+    <div id="play-overlay">
+        <h2 style="margin-bottom: 20px;">השידור התקבל!</h2>
+        <button onclick="forcePlay()">לחץ כאן לצפייה בשידור</button>
+    </div>
+
+    <div class="box" id="setup">
+        <h2 style="margin-top:0">Magic Cam HD</h2>
+        <input type="text" id="roomInput" placeholder="שם חדר" oninput="updateUI()">
+        <div class="btn-group">
+            <button class="pc-btn" onclick="init(true)">אני צופה (Monitor)</button>
+            <button class="cam-btn" onclick="init(false)">אני המשדר (Camera)</button>
+        </div>
+    </div>
+
+    <video id="v" autoplay playsinline></video>
+
+    <script>
+        let peer, localStream, currentRoom, isMonitorMode;
+        let useFacingMode = "environment";
+        const statusEl = document.getElementById('status-msg');
+        let pendingStream = null;
+
+        function updateUI() {
+            const room = document.getElementById('roomInput').value;
+            if(room) {
+                const url = window.location.origin + window.location.pathname + '?room=' + encodeURIComponent(room);
+                document.getElementById('link-text').innerText = url;
+                document.getElementById('url-bar').style.display = 'flex';
+            }
+        }
+
+        function copyLink() {
+            navigator.clipboard.writeText(document.getElementById('link-text').innerText);
+            alert("הקישור הועתק!");
+        }
+
+        function init(isMonitor) {
+            isMonitorMode = isMonitor;
+            currentRoom = document.getElementById('roomInput').value;
+            if (!currentRoom) return alert("הכנס שם חדר");
+
+            const peerConfig = {
+                config: {
+                    'iceServers': [
+                        { 'urls': 'stun:stun.l.google.com:19302' },
+                        { 'urls': 'stun:stun1.l.google.com:19302' },
+                        { 'urls': 'stun:stun2.l.google.com:19302' }
+                    ]
+                },
+                debug: 1
+            };
+
+            const myId = isMonitor ? null : `host-${currentRoom}`;
+            peer = new Peer(myId, peerConfig);
+
+            peer.on('open', (id) => {
+                statusEl.innerText = isMonitor ? "מחפש שידור חי..." : "שידור פעיל. מחכה לצופים...";
+                if (isMonitor) {
+                    setTimeout(startViewer, 500);
+                } else {
+                    startCamera();
+                }
+            });
+
+            peer.on('error', (err) => {
+                console.error('Peer Error:', err.type);
+                if(err.type === 'peer-unavailable') statusEl.innerText = "המצלמה לא מחוברת בחדר זה. ודא שהמצלמה פתוחה.";
+                else statusEl.innerText = "שגיאת חיבור: " + err.type;
+            });
+        }
+
+        async function startCamera() {
+            try {
+                localStream = await navigator.mediaDevices.getUserMedia({
+                    video: { facingMode: useFacingMode, width: { ideal: 1280 }, height: { ideal: 720 } },
+                    audio: true
+                });
+                render(localStream);
+                document.getElementById('flip-btn').style.display = 'block';
+
+                peer.on('call', (call) => {
+                    console.log("צופה חדש מבקש להתחבר...");
+                    call.answer(localStream);
+                    statusEl.innerText = "צופה התחבר בהצלחה!";
+                });
+            } catch (err) { alert("שגיאה במצלמה: " + err.message); }
+        }
+
+        function startViewer() {
+            const dummyCanvas = document.createElement("canvas");
+            dummyCanvas.width = dummyCanvas.height = 1;
+            const dummyStream = dummyCanvas.captureStream();
+
+            const call = peer.call(`host-${currentRoom}`, dummyStream);
+            
+            call.on('stream', (remoteStream) => {
+                console.log("וידאו התקבל מהמשדר!");
+                statusEl.innerText = "שידור חי פעיל!";
+                pendingStream = remoteStream;
+                
+                const v = document.getElementById('v');
+                v.srcObject = remoteStream;
+                v.muted = false;
+                
+                // ניסיון ניגון אוטומטי, אם הדפדפן חוסם - נפתח כפתור ידני
+                v.play().then(() => {
+                    document.getElementById('setup').style.display = 'none';
+                    v.style.display = 'block';
+                }).catch(() => {
+                    document.getElementById('play-overlay').style.display = 'flex';
+                });
+            });
+
+            setTimeout(() => {
+                if (!document.getElementById('v').srcObject) {
+                    statusEl.innerText = "מנסה חיבור חוזר...";
+                    startViewer();
+                }
+            }, 8000);
+        }
+
+        function forcePlay() {
+            const v = document.getElementById('v');
+            if (pendingStream) v.srcObject = pendingStream;
+            v.play().then(() => {
+                document.getElementById('play-overlay').style.display = 'none';
+                document.getElementById('setup').style.display = 'none';
+                v.style.display = 'block';
+                statusEl.innerText = "שידור חי פעיל";
+            }).catch(e => alert("נא לאשר ניגון שמע/וידאו בדפדפן"));
+        }
+
+        function flipCamera() {
+            useFacingMode = (useFacingMode === "environment") ? "user" : "environment";
+            navigator.mediaDevices.getUserMedia({ video: { facingMode: useFacingMode } }).then(s => {
+                const videoTrack = s.getVideoTracks()[0];
+                localStream.getVideoTracks()[0].stop();
+                localStream.removeTrack(localStream.getVideoTracks()[0]);
+                localStream.addTrack(videoTrack);
+                document.getElementById('v').srcObject = localStream;
+            });
+        }
+
+        function render(stream) {
+            document.getElementById('setup').style.display = 'none';
+            const v = document.getElementById('v');
+            v.style.display = 'block';
+            v.srcObject = stream;
+            v.muted = !isMonitorMode; 
+            v.play().catch(() => {
+                statusEl.innerText = "לחץ על המסך לצפייה";
+                window.onclick = () => { v.play(); statusEl.innerText = "שידור חי"; };
+            });
+        }
+
+        const params = new URLSearchParams(window.location.search);
+        if(params.get('room')) {
+            document.getElementById('roomInput').value = params.get('room');
+            updateUI();
+        }
+    </script>
+</body>
+</html>
